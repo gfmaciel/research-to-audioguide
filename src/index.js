@@ -15,6 +15,9 @@ const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const COOKIE_NAME = "auth";
 const COOKIE_MAX_AGE = 31536000; // 1 year, sticks on the phone
 
+// Prebuilt Gemini voices with baked one-liner previews in /public/voices/.
+const VOICES = ["Sulafat", "Kore", "Aoede", "Leda", "Callirrhoe", "Charon", "Fenrir", "Puck"];
+
 // ---------------------------------------------------------------------------
 // auth
 // ---------------------------------------------------------------------------
@@ -380,11 +383,11 @@ function errMsg(e) {
   return e instanceof Error ? e.message : String(e);
 }
 
-async function geminiSynthesize(env, text) {
+async function geminiSynthesize(env, text, voiceOverride) {
   const key = (env.GEMINI_API_KEY || "").trim();
   if (!key) throw new Error("Gemini API key is not configured");
   const model = (env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts").trim();
-  const voice = (env.GEMINI_TTS_VOICE || "").trim();
+  const voice = String(voiceOverride || env.GEMINI_TTS_VOICE || "").trim();
   const direction = (env.TTS_DIRECTION || "").trim();
   const prompt = direction
     ? `${direction}\n\nLeia e narre exatamente o texto a seguir, sem acrescentar, remover ou resumir palavras:\n\n${text}`
@@ -414,12 +417,12 @@ async function geminiSynthesize(env, text) {
   return { bytes, format: "wav" };
 }
 
-async function openrouterSynthesize(env, text) {
+async function openrouterSynthesize(env, text, voiceOverride) {
   const key = (env.OPENROUTER_API_KEY || "").trim();
   if (!key) throw new Error("OpenRouter API key is not configured");
   const model = (env.OPENROUTER_TTS_MODEL || "").trim();
   if (!model) throw new Error("OpenRouter model is not configured");
-  const voice = (env.OPENROUTER_TTS_VOICE || "").trim();
+  const voice = String(voiceOverride || env.OPENROUTER_TTS_VOICE || "").trim();
   const upstream = model.toLowerCase().startsWith("google/gemini") ? "pcm" : "mp3";
   const payload = { model, input: text, response_format: upstream };
   if (voice) payload.voice = voice;
@@ -435,16 +438,16 @@ async function openrouterSynthesize(env, text) {
   return { bytes, format: "mp3" };
 }
 
-async function speakText(env, text) {
+async function speakText(env, text, voice) {
   const maxChars = Math.max(500, parseInt(env.TTS_MAX_CHARS || "4000", 10) || 4000);
   const chunks = splitText(text, maxChars);
   if (chunks.length === 1) {
     try {
-      const r = await geminiSynthesize(env, text);
+      const r = await geminiSynthesize(env, text, voice);
       return { ...r, provider: "gemini" };
     } catch (e1) {
       try {
-        const r = await openrouterSynthesize(env, text);
+        const r = await openrouterSynthesize(env, text, voice);
         return { ...r, provider: "openrouter" };
       } catch (e2) {
         throw new Error(`all providers failed — gemini: ${errMsg(e1)}; openrouter: ${errMsg(e2)}`);
@@ -457,10 +460,10 @@ async function speakText(env, text) {
   for (const chunk of chunks) {
     let r = null;
     try {
-      r = { ...(await geminiSynthesize(env, chunk)), provider: "gemini" };
+      r = { ...(await geminiSynthesize(env, chunk, voice)), provider: "gemini" };
     } catch (e1) {
       try {
-        const o = await openrouterSynthesize(env, chunk);
+        const o = await openrouterSynthesize(env, chunk, voice);
         if (o.format !== "wav") throw new Error("OpenRouter returned mp3; long tracks need a PCM/WAV fallback model");
         r = { ...o, provider: "openrouter" };
       } catch (e2) {
@@ -509,16 +512,37 @@ input,button{font-size:1rem;padding:.6rem;margin:.3rem 0}button{cursor:pointer}
 .card{border:1px solid #ccc;border-radius:.5rem;padding:.8rem;margin:.8rem 0}
 .cue{color:#555;font-style:italic}audio{width:100%;margin-top:.5rem}
 .muted{color:#666;font-size:.9rem}#status{min-height:1.4em;font-weight:bold}
-.top{display:flex;justify-content:space-between;align-items:center}</style></head><body>
+.top{display:flex;justify-content:space-between;align-items:center}
+.vrow{display:flex;gap:.5rem;align-items:center;border:1px solid #ddd;border-radius:.5rem;padding:.4rem;margin:.3rem 0}
+.vrow.sel{border-color:#000;background:#f4f4f4}.vrow audio{flex:1;min-width:0}</style></head><body>
 <div class="top"><h1>docx → áudio</h1><a href="/api/logout">sair</a></div>
 <p class="muted">Envie o .docx MASTER. Só o texto de [[NARRATION]] é narrado; OUVIR QUANDO e NOTAS ficam de fora.</p>
+<h2>Voz <span id="voicenow" class="muted"></span></h2>
+<p class="muted">Ouça a mesma frase em cada voz e escolha. A escolha fica salva neste aparelho.</p>
+<div id="voices"></div>
 <input id="file" type="file" accept=".docx">
 <button id="parse">1. Ler faixas</button>
 <p id="status"></p>
 <div id="tracks"></div>
 <script>
 let TRACKS=[];
+let DOCNAME='audioguia';
 const status=document.getElementById('status');
+const VOICES=['Sulafat','Kore','Aoede','Leda','Callirrhoe','Charon','Fenrir','Puck'];
+let VOICE=localStorage.getItem('voice')||'Sulafat';
+if(!VOICES.includes(VOICE))VOICE='Sulafat';
+function renderVoices(){
+  document.getElementById('voicenow').textContent='— atual: '+VOICE;
+  const w=document.getElementById('voices');w.innerHTML='';
+  VOICES.forEach(v=>{
+    const d=document.createElement('div');d.className='vrow'+(v===VOICE?' sel':'');
+    d.innerHTML='<b>'+v+'</b><audio controls preload="none" src="/voices/'+v+'.mp3"></audio>';
+    const b=document.createElement('button');b.textContent=v===VOICE?'✓ atual':'usar';
+    b.onclick=()=>{VOICE=v;try{localStorage.setItem('voice',v);}catch(e){}renderVoices();};
+    d.appendChild(b);w.appendChild(d);
+  });
+}
+renderVoices();
 function slug(s){return (s||'').normalize('NFKD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'faixa';}
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');}
 document.getElementById('parse').onclick=async()=>{
@@ -531,12 +555,17 @@ document.getElementById('parse').onclick=async()=>{
   const data=await r.json();
   if(!r.ok){status.textContent='Erro: '+(data.error||r.status);return;}
   TRACKS=data.tracks;
+  DOCNAME=(f.name||'audioguia').replace(/\.[^.]+$/,'');
   status.textContent=data.tracks.length+' faixa(s) encontrada(s).';
   const wrap=document.getElementById('tracks');
   const all=document.createElement('button');
   all.textContent='2. Gerar áudio de todas';
   all.onclick=()=>generateAll(all);
   wrap.appendChild(all);
+  const zip=document.createElement('button');
+  zip.id='zipall';zip.disabled=true;zip.textContent='3. Baixar tudo (.zip)';
+  zip.onclick=downloadAll;
+  wrap.appendChild(zip);
   TRACKS.forEach((t,i)=>{
     const d=document.createElement('div');d.className='card';d.id='card'+i;
     d.innerHTML='<h3>'+String(t.number).padStart(2,'0')+' — '+esc(t.title)+'</h3>'
@@ -559,19 +588,21 @@ async function generateOne(i){
   out.innerHTML='<p>Gerando… (gemini → openrouter)</p>';
   try{
     const r=await fetch('/api/speak',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:t.text,title:t.title,number:t.number}),signal:c.signal});
+      body:JSON.stringify({text:t.text,title:t.title,number:t.number,voice:VOICE}),signal:c.signal});
     if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error||('HTTP '+r.status));}
     const ct=r.headers.get('Content-Type')||'';
     const ext=ct.includes('mpeg')?'mp3':'wav';
     const prov=r.headers.get('X-Provider')||'?';
+    const vused=r.headers.get('X-Voice')||VOICE;
     const blob=await r.blob();
     const url=URL.createObjectURL(blob);
     const name=String(t.number).padStart(2,'0')+'_'+slug(t.title)+'.'+ext;
-    out.innerHTML='<p class="muted">via '+esc(prov)+'</p>'
+    t._buf=await blob.arrayBuffer();t._file=name;refreshZipBtn();
+    out.innerHTML='<p class="muted">via '+esc(prov)+' · '+esc(vused)+'</p>'
       +'<audio controls src="'+url+'"></audio><br>'
       +'<a href="'+url+'" download="'+name+'">Baixar '+name+'</a>';
   }catch(e){out.innerHTML=e&&e.name==='AbortError'?'<p>Cancelado.</p>':'<p style="color:#b00">Falhou: '+esc(e.message)+'</p>';}
-  finally{delete CTRL[i];if(CTRL.current===c)CTRL.current=null;if(btn)btn.textContent='Gerar esta faixa';}
+  finally{delete CTRL[i];if(CTRL.current===c)CTRL.current=null;if(btn)btn.textContent='Gerar esta faixa';refreshZipBtn();}
 }
 async function generateAll(btn){
   if(batchOn){stopBatch=true;if(CTRL.current)CTRL.current.abort();return;}
@@ -585,6 +616,55 @@ async function generateAll(btn){
   }
   status.textContent=stopBatch?('Parado em '+done+'/'+TRACKS.length+'.'):('Pronto: '+TRACKS.length+' faixa(s).');
   batchOn=false;btn.textContent='2. Gerar áudio de todas';
+}
+function refreshZipBtn(){
+  const z=document.getElementById('zipall');if(!z)return;
+  const ready=TRACKS.filter(t=>t._buf);
+  z.disabled=!ready.length;
+  z.textContent='3. Baixar tudo (.zip) — '+ready.length+'/'+TRACKS.length;
+}
+const crcTable=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?3988292384^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+function crc32(u8){let c=~0;for(let i=0;i<u8.length;i++)c=crcTable[(c^u8[i])&255]>>>0^(c>>>8);return (~c)>>>0;}
+function zipStore(files){
+  const enc=new TextEncoder();const parts=[];const central=[];let off=0;
+  const w16=(o,a,v)=>{o[a]=v&255;o[a+1]=(v>>>8)&255;};
+  const w32=(o,a,v)=>{o[a]=v&255;o[a+1]=(v>>>8)&255;o[a+2]=(v>>>16)&255;o[a+3]=(v>>>24)&255;};
+  for(const f of files){
+    const nb=enc.encode(f.name);const crc=crc32(f.data);
+    const lh=new Uint8Array(30+nb.length);
+    w32(lh,0,0x04034b50);w16(lh,4,20);w16(lh,6,0x0800);w16(lh,8,0);
+    w16(lh,10,0);w16(lh,12,0x5C21);
+    w32(lh,14,crc);w32(lh,18,f.data.length);w32(lh,22,f.data.length);
+    w16(lh,26,nb.length);w16(lh,28,0);lh.set(nb,30);
+    parts.push(lh,f.data);central.push({nb,crc,len:f.data.length,off});off+=lh.length+f.data.length;
+  }
+  const cstart=off;const cparts=[];
+  for(const c of central){
+    const ch=new Uint8Array(46+c.nb.length);
+    w32(ch,0,0x02014b50);w16(ch,4,20);w16(ch,6,20);w16(ch,8,0x0800);w16(ch,10,0);
+    w16(ch,12,0);w16(ch,14,0x5C21);w32(ch,16,c.crc);w32(ch,20,c.len);w32(ch,24,c.len);
+    w16(ch,28,c.nb.length);w16(ch,30,0);w16(ch,32,0);w16(ch,34,0);w16(ch,36,0);
+    w32(ch,38,0);w32(ch,42,c.off);ch.set(c.nb,46);
+    cparts.push(ch);off+=ch.length;
+  }
+  const csize=off-cstart;
+  const end=new Uint8Array(22);
+  w32(end,0,0x06054b50);w16(end,4,0);w16(end,6,0);w16(end,8,central.length);w16(end,10,central.length);
+  w32(end,12,csize);w32(end,16,cstart);w16(end,20,0);
+  const out=new Uint8Array(off+22);let p=0;
+  for(const x of [...parts,...cparts,end]){out.set(x,p);p+=x.length;}
+  return out;
+}
+async function downloadAll(){
+  const ready=TRACKS.filter(t=>t._buf);
+  if(!ready.length){status.textContent='Gere ao menos uma faixa antes de baixar.';return;}
+  status.textContent='Montando zip…';
+  const zb=zipStore(ready.map(t=>({name:t._file,data:new Uint8Array(t._buf)})));
+  const url=URL.createObjectURL(new Blob([zb],{type:'application/zip'}));
+  const a=document.createElement('a');a.href=url;
+  a.download=slug(DOCNAME||'audioguia')+'-audios.zip';
+  document.body.appendChild(a);a.click();a.remove();
+  status.textContent='Zip com '+ready.length+' faixa(s) baixado.';
 }
 </script></body></html>`;
 
@@ -664,12 +744,14 @@ export default {
         const text = String(body.text || "");
         if (!text.trim()) return json({ error: "empty text" }, 400);
         if (text.length > 60000) return json({ error: "text too long (max 60000 chars)" }, 400);
+        const voice = VOICES.includes(String(body.voice || "")) ? String(body.voice) : null;
         try {
-          const r = await speakText(env, text);
+          const r = await speakText(env, text, voice);
           return new Response(r.bytes, {
             headers: {
               "Content-Type": r.format === "mp3" ? "audio/mpeg" : "audio/wav",
               "X-Provider": r.provider,
+              "X-Voice": voice || (env.GEMINI_TTS_VOICE || "default"),
               "Cache-Control": "no-store",
             },
           });
