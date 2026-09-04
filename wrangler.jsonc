@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "research-to-audioguide",
+  "main": "src/index.js",
+  "compatibility_date": "2025-08-01",
+  "vars": {
+    "GEMINI_TTS_MODEL": "gemini-3.1-flash-tts-preview",
+    "GEMINI_TTS_VOICE": "Sulafat",
+    "OPENROUTER_TTS_MODEL": "google/gemini-3.1-flash-tts-preview",
+    "OPENROUTER_TTS_VOICE": "Sulafat",
+    "TTS_DIRECTION": "Português brasileiro natural; narrador de documentário de viagem, curioso e caloroso, ritmo relativamente tranquilo, pausas naturais e suspense discreto. Sem voz de propaganda ou locutor corporativo. Preserve pronúncias espanholas e Lickanantay razoavelmente naturais. Leia exatamente o texto, sem acrescentar, remover ou resumir conteúdo.",
+    "TTS_MAX_CHARS": "4000"
+  }
+}
