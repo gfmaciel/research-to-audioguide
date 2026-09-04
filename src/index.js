@@ -535,7 +535,7 @@ document.getElementById('parse').onclick=async()=>{
   const wrap=document.getElementById('tracks');
   const all=document.createElement('button');
   all.textContent='2. Gerar áudio de todas';
-  all.onclick=generateAll;
+  all.onclick=()=>generateAll(all);
   wrap.appendChild(all);
   TRACKS.forEach((t,i)=>{
     const d=document.createElement('div');d.className='card';d.id='card'+i;
@@ -548,13 +548,18 @@ document.getElementById('parse').onclick=async()=>{
   });
   wrap.querySelectorAll('button[data-i]').forEach(b=>b.onclick=()=>generateOne(+b.dataset.i));
 };
+const CTRL={current:null};let stopBatch=false,batchOn=false;
 async function generateOne(i){
   const t=TRACKS[i];
   const out=document.querySelector('#card'+i+' .out');
+  const btn=document.querySelector('button[data-i="'+i+'"]');
+  if(CTRL[i]){CTRL[i].abort();return;}
+  const c=new AbortController();CTRL[i]=c;CTRL.current=c;
+  if(btn)btn.textContent='Cancelar';
   out.innerHTML='<p>Gerando… (gemini → openrouter)</p>';
   try{
     const r=await fetch('/api/speak',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:t.text,title:t.title,number:t.number})});
+      body:JSON.stringify({text:t.text,title:t.title,number:t.number}),signal:c.signal});
     if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error||('HTTP '+r.status));}
     const ct=r.headers.get('Content-Type')||'';
     const ext=ct.includes('mpeg')?'mp3':'wav';
@@ -565,14 +570,21 @@ async function generateOne(i){
     out.innerHTML='<p class="muted">via '+esc(prov)+'</p>'
       +'<audio controls src="'+url+'"></audio><br>'
       +'<a href="'+url+'" download="'+name+'">Baixar '+name+'</a>';
-  }catch(e){out.innerHTML='<p style="color:#b00">Falhou: '+esc(e.message)+'</p>';}
+  }catch(e){out.innerHTML=e&&e.name==='AbortError'?'<p>Cancelado.</p>':'<p style="color:#b00">Falhou: '+esc(e.message)+'</p>';}
+  finally{delete CTRL[i];if(CTRL.current===c)CTRL.current=null;if(btn)btn.textContent='Gerar esta faixa';}
 }
-async function generateAll(){
+async function generateAll(btn){
+  if(batchOn){stopBatch=true;if(CTRL.current)CTRL.current.abort();return;}
+  batchOn=true;stopBatch=false;btn.textContent='■ Parar';
+  let done=0;
   for(let i=0;i<TRACKS.length;i++){
+    if(stopBatch)break;
     status.textContent='Gerando '+(i+1)+'/'+TRACKS.length+'…';
     await generateOne(i);
+    done++;
   }
-  status.textContent='Pronto: '+TRACKS.length+' faixa(s).';
+  status.textContent=stopBatch?('Parado em '+done+'/'+TRACKS.length+'.'):('Pronto: '+TRACKS.length+' faixa(s).');
+  batchOn=false;btn.textContent='2. Gerar áudio de todas';
 }
 </script></body></html>`;
 
