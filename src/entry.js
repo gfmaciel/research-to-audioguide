@@ -30,6 +30,31 @@ function enablePdfUi(html) {
     );
 }
 
+// The durable batch client stores the current Workflow id in localStorage so a
+// reload can recover its manifest and R2 audio. Keep that pointer after a batch
+// finishes (or partially errors); otherwise the generated files still exist in
+// R2 but the refreshed page has no way to discover them. A successfully parsed
+// new document intentionally starts a new session and clears the old pointer.
+function preserveBatchProgress(html) {
+  return html
+    .replace(
+      "document.getElementById('parse').onclick=async()=>{\n  const f=",
+      "document.getElementById('parse').onclick=async()=>{\n  if(batchOn){status.textContent='Pare a geração atual antes de carregar outro documento.';return;}\n  const f=",
+    )
+    .replace(
+      "TRACKS=data.tracks;\n  DOCNAME=",
+      "TRACKS=data.tracks;\n  try{localStorage.removeItem('audioguide_batch_job');}catch(e){}\n  DOCNAME=",
+    )
+    .replace(
+      "batchOn=false;batchJobId=null;try{localStorage.removeItem(BATCH_KEY);}catch(e){}\n        if(btn)btn.textContent='2. Gerar áudio de todas';return;\n      }\n      if(data.state==='errored'||data.state==='terminated')",
+      "batchOn=false;batchJobId=null;\n        if(btn)btn.textContent='2. Gerar áudio de todas';return;\n      }\n      if(data.state==='errored'||data.state==='terminated')",
+    )
+    .replace(
+      "batchOn=false;batchJobId=null;try{localStorage.removeItem(BATCH_KEY);}catch(e){}\n        if(btn)btn.textContent='2. Gerar áudio de todas';return;\n      }\n      status.textContent='Gerando no servidor:",
+      "batchOn=false;batchJobId=null;if(data.state==='terminated'){try{localStorage.removeItem(BATCH_KEY);}catch(e){}}\n        if(btn)btn.textContent='2. Gerar áudio de todas';return;\n      }\n      status.textContent='Gerando no servidor:",
+    );
+}
+
 async function recoverStartingJob(req, env, url, res) {
   if (req.method !== "GET" || res.status !== 404 || !env.AUDIO_BUCKET) return res;
   const match = url.pathname.match(/^\/api\/jobs\/([A-Za-z0-9_-]{1,100})$/);
@@ -128,7 +153,7 @@ export default {
       return res;
     }
     const html = await res.text();
-    return new Response(enablePdfUi(injectExistingPerf(html)), {
+    return new Response(preserveBatchProgress(enablePdfUi(injectExistingPerf(html))), {
       status: res.status,
       statusText: res.statusText,
       headers: res.headers,
