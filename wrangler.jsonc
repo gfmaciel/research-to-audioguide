@@ -4,6 +4,9 @@
   "main": "src/entry.js",
   "compatibility_date": "2025-08-01",
   "assets": { "directory": "./public" },
+  "ai": {
+    "binding": "AI"
+  },
   "r2_buckets": [
     {
       "binding": "AUDIO_BUCKET",

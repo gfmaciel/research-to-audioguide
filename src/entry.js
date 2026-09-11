@@ -1,6 +1,9 @@
 import durable, { AudioguideBatchWorkflow } from "./background.js";
+import { parseAudioguide } from "./index.js";
 
 export { AudioguideBatchWorkflow };
+
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 
 // Keep the existing lightweight single-track retry/offline enhancement. It
 // loads before the durable batch override, so only "Gerar todas" is replaced.
@@ -12,6 +15,19 @@ function injectExistingPerf(html) {
   const scriptAt = html.lastIndexOf("<script>", markerAt);
   if (scriptAt < 0) return html;
   return html.slice(0, scriptAt) + '<script src="/perf.js"></script>' + html.slice(scriptAt);
+}
+
+function enablePdfUi(html) {
+  return html
+    .replace("<title>Audioguia — docx para áudio</title>", "<title>Audioguia — documento para áudio</title>")
+    .replace("<h1>docx → áudio</h1>", "<h1>docx/pdf → áudio</h1>")
+    .replace("Envie o .docx MASTER.", "Envie o .docx ou .pdf MASTER.")
+    .replace('accept=".docx"', 'accept=".docx,.pdf,application/pdf"')
+    .replace("Escolha um .docx primeiro.", "Escolha um .docx ou .pdf primeiro.")
+    .replace(
+      "const r=await fetch('/api/parse',{method:'POST',body:fd});",
+      "const parseUrl=/\\.pdf$/i.test(f.name)?'/api/parse-pdf':'/api/parse';\n  const r=await fetch(parseUrl,{method:'POST',body:fd});",
+    );
 }
 
 async function recoverStartingJob(req, env, url, res) {
@@ -40,15 +56,82 @@ async function recoverStartingJob(req, env, url, res) {
   return Response.json(payload, { status: 202 });
 }
 
+async function handlePdfParse(req, env, ctx) {
+  // Reuse the existing app's authentication rather than maintaining a second
+  // auth implementation here. An empty parse request reaches 400 when authed
+  // and 401 when the cookie is missing/invalid.
+  const probeHeaders = new Headers();
+  const cookie = req.headers.get("Cookie");
+  if (cookie) probeHeaders.set("Cookie", cookie);
+  const authProbe = await durable.fetch(
+    new Request(new URL("/api/parse", req.url), { method: "POST", headers: probeHeaders }),
+    env,
+    ctx,
+  );
+  if (authProbe.status === 401 || authProbe.status >= 500) return authProbe;
+
+  if (!env.AI) return Response.json({ error: "PDF parsing is not configured (missing AI binding)" }, { status: 500 });
+
+  let form;
+  try {
+    form = await req.formData();
+  } catch {
+    return Response.json({ error: "expected multipart form with a file field" }, { status: 400 });
+  }
+  const file = form.get("file");
+  if (!file || typeof file === "string") return Response.json({ error: "missing file field" }, { status: 400 });
+  if (!/\.pdf$/i.test(file.name || "")) return Response.json({ error: "only .pdf files are accepted here" }, { status: 400 });
+  if (file.size > MAX_UPLOAD_BYTES) return Response.json({ error: "file too large (max 15 MB)" }, { status: 400 });
+
+  try {
+    const converted = await env.AI.toMarkdown(
+      {
+        name: file.name,
+        blob: new Blob([file], { type: "application/pdf" }),
+      },
+      {
+        conversionOptions: {
+          pdf: { metadata: false },
+          output: { format: "text" },
+        },
+      },
+    );
+    const result = Array.isArray(converted) ? converted[0] : converted;
+    if (!result || result.format === "error") {
+      return Response.json({ error: result?.error || "PDF text extraction failed" }, { status: 400 });
+    }
+    const text = String(result.data || "").trim();
+    if (!text) {
+      return Response.json(
+        { error: "PDF has no selectable text. Scanned/image-only PDFs are not supported." },
+        { status: 400 },
+      );
+    }
+    const tracks = parseAudioguide(text.split(/\r?\n/), file.name);
+    return Response.json({ filename: file.name, tracks });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return Response.json({ error: message.replace(/\.docx/g, ".pdf") }, { status: 400 });
+  }
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (req.method === "POST" && url.pathname === "/api/parse-pdf") {
+      return handlePdfParse(req, env, ctx);
+    }
+
     let res = await durable.fetch(req, env, ctx);
     res = await recoverStartingJob(req, env, url, res);
     if (req.method !== "GET" || url.pathname !== "/" || !(res.headers.get("Content-Type") || "").includes("text/html")) {
       return res;
     }
     const html = await res.text();
-    return new Response(injectExistingPerf(html), { status: res.status, statusText: res.statusText, headers: res.headers });
+    return new Response(enablePdfUi(injectExistingPerf(html)), {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   },
 };
