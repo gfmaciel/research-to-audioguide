@@ -35,11 +35,55 @@ function enablePdfUi(html) {
 // finishes (or partially errors); otherwise the generated files still exist in
 // R2 but the refreshed page has no way to discover them. A successfully parsed
 // new document intentionally starts a new session and clears the old pointer.
+//
+// The source batch client predates document switching while jobs are active.
+// Patch in a small cancellation/session barrier so an in-flight response from
+// document A can never write audio/status into document B after "Ler faixas".
 function preserveBatchProgress(html) {
   return html
     .replace(
+      "const sleep=ms=>new Promise(r=>setTimeout(r,ms));",
+      "const sleep=ms=>new Promise(r=>setTimeout(r,ms));\nwindow.cancelAudioguideBatch=async function(){\n  let id=batchJobId;try{if(!id)id=localStorage.getItem(BATCH_KEY);}catch(e){}\n  batchPollToken++;batchOn=false;batchJobId=null;\n  try{localStorage.removeItem(BATCH_KEY);}catch(e){}\n  if(id){try{await fetch('/api/jobs/'+encodeURIComponent(id),{method:'DELETE'});}catch(e){}}\n};",
+    )
+    .replace(
+      "async function installReady(jobId,meta){\n  const i=Number(meta.index);const t=TRACKS[i];if(!t||t._buf)return;",
+      "async function installReady(jobId,meta,token){\n  if(token!==batchPollToken||batchJobId!==jobId)return;\n  const i=Number(meta.index);const t=TRACKS[i];if(!t||t._buf)return;",
+    )
+    .replace(
+      "const buf=await r.arrayBuffer();\n  const blob=new Blob([buf],{type:r.headers.get('Content-Type')||'audio/wav'});",
+      "const buf=await r.arrayBuffer();\n  if(token!==batchPollToken||batchJobId!==jobId||TRACKS[i]!==t)return;\n  const blob=new Blob([buf],{type:r.headers.get('Content-Type')||'audio/wav'});",
+    )
+    .replace(
+      "const data=await r.json();\n      await Promise.all((data.ready||[]).map(meta=>installReady(jobId,meta)));",
+      "const data=await r.json();\n      if(token!==batchPollToken||batchJobId!==jobId)return;\n      await Promise.all((data.ready||[]).map(meta=>installReady(jobId,meta,token)));\n      if(token!==batchPollToken||batchJobId!==jobId)return;",
+    )
+    .replace(
+      "}catch(e){\n      status.textContent=navigator.onLine?('Sem conseguir consultar o job: '+e.message+'. Tentando novamente…'):'Sem internet. A geração continua no servidor e será retomada aqui quando a conexão voltar.';",
+      "}catch(e){\n      if(token!==batchPollToken||batchJobId!==jobId)return;\n      status.textContent=navigator.onLine?('Sem conseguir consultar o job: '+e.message+'. Tentando novamente…'):'Sem internet. A geração continua no servidor e será retomada aqui quando a conexão voltar.';",
+    )
+    .replace(
+      "const jobId='j'+crypto.randomUUID().replace(/-/g,'');batchJobId=jobId;",
+      "const jobId='j'+crypto.randomUUID().replace(/-/g,'');batchJobId=jobId;const startToken=batchPollToken;",
+    )
+    .replace(
+      "if(!r.ok){try{localStorage.removeItem(BATCH_KEY);}catch(e){}batchJobId=null;throw new Error(data.error||('HTTP '+r.status));}\n    await monitorBatch(jobId,btn);",
+      "if(!r.ok){try{localStorage.removeItem(BATCH_KEY);}catch(e){}batchJobId=null;throw new Error(data.error||('HTTP '+r.status));}\n    if(startToken!==batchPollToken||batchJobId!==jobId){try{await fetch('/api/jobs/'+encodeURIComponent(jobId),{method:'DELETE'});}catch(e){}return;}\n    await monitorBatch(jobId,btn);",
+    )
+    .replace(
+      "}catch(e){\n    if(batchJobId===jobId){status.textContent=navigator.onLine?('Não consegui confirmar o início: '+e.message+'. Vou verificar o job…'):'A conexão caiu ao iniciar. Se o servidor recebeu o pedido, a geração continuará; vou verificar quando a internet voltar.';await monitorBatch(jobId,btn);}",
+      "}catch(e){\n    if(startToken!==batchPollToken)return;\n    if(batchJobId===jobId){status.textContent=navigator.onLine?('Não consegui confirmar o início: '+e.message+'. Vou verificar o job…'):'A conexão caiu ao iniciar. Se o servidor recebeu o pedido, a geração continuará; vou verificar quando a internet voltar.';await monitorBatch(jobId,btn);}",
+    )
+    .replace(
+      "async function resumePrevious(){\n  let id=null;try{id=localStorage.getItem(BATCH_KEY);}catch(e){}if(!id)return;",
+      "async function resumePrevious(){\n  const resumeToken=batchPollToken;\n  let id=null;try{id=localStorage.getItem(BATCH_KEY);}catch(e){}if(!id)return;",
+    )
+    .replace(
+      "const data=await r.json();if(!TRACKS.length&&data.manifest)renderRecovered(data.manifest);",
+      "const data=await r.json();if(resumeToken!==batchPollToken)return;if(!TRACKS.length&&data.manifest)renderRecovered(data.manifest);",
+    )
+    .replace(
       "document.getElementById('parse').onclick=async()=>{\n  const f=",
-      "document.getElementById('parse').onclick=async()=>{\n  if(batchOn){status.textContent='Pare a geração atual antes de carregar outro documento.';return;}\n  const f=",
+      "document.getElementById('parse').onclick=async()=>{\n  if(batchOn&&typeof window.cancelAudioguideBatch!=='function'){status.textContent='Não foi possível cancelar a geração atual. Atualize a página e tente novamente.';return;}\n  const f=",
     )
     .replace(
       "TRACKS=data.tracks;\n  DOCNAME=",
