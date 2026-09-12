@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "r2:retention:30d": "wrangler r2 bucket lifecycle add research-to-audioguide-jobs expire-audioguide-jobs-30d jobs/ --expire-days 30 --force"
   },
   "dependencies": {
     "fflate": "^0.8.2"

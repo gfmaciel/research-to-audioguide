@@ -12,6 +12,7 @@
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const activeSingles = new Map();
+  let documentEpoch = 0;
 
   function openDb() {
     return new Promise((resolve, reject) => {
@@ -95,6 +96,40 @@
     saveSingleJobs(jobs);
   }
 
+  function terminateJob(jobId) {
+    if (!jobId || typeof jobId !== 'string') return;
+    fetch('/api/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' }).catch(() => {});
+  }
+
+  function cancelPreviousSession() {
+    documentEpoch++;
+
+    const jobs = new Set(Object.values(loadSingleJobs()).filter(id => typeof id === 'string' && id));
+    for (const id of activeSingles.values()) jobs.add(id);
+    activeSingles.clear();
+    saveSingleJobs({});
+    jobs.forEach(terminateJob);
+
+    for (const t of TRACKS) {
+      if (t?._url) URL.revokeObjectURL(t._url);
+    }
+
+    if (typeof window.cancelAudioguideBatch === 'function') {
+      window.cancelAudioguideBatch().catch(() => {});
+    } else {
+      try {
+        const oldBatch = localStorage.getItem(BATCH_KEY);
+        localStorage.removeItem(BATCH_KEY);
+        terminateJob(oldBatch);
+      } catch (_) {}
+      try {
+        batchOn = false;
+        stopBatch = true;
+        if (CTRL.current) CTRL.current.abort();
+      } catch (_) {}
+    }
+  }
+
   function addTrackControls(wrap) {
     const all = document.createElement('button');
     all.id = 'batchall';
@@ -132,13 +167,15 @@
     refreshZipBtn();
   }
 
-  async function installSingleAudio(index, jobId, meta) {
+  async function installSingleAudio(index, jobId, meta, epoch = documentEpoch) {
+    if (epoch !== documentEpoch) return false;
     const t = TRACKS[index];
     if (!t) return false;
     const r = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/audio/0');
     if (!r.ok) return false;
 
     const buf = await r.arrayBuffer();
+    if (epoch !== documentEpoch || TRACKS[index] !== t) return false;
     const blob = new Blob([buf], { type: r.headers.get('Content-Type') || 'audio/wav' });
     const url = URL.createObjectURL(blob);
     if (t._url) URL.revokeObjectURL(t._url);
@@ -156,7 +193,8 @@
     return true;
   }
 
-  async function monitorSingle(index, jobId) {
+  async function monitorSingle(index, jobId, epoch = documentEpoch) {
+    if (epoch !== documentEpoch) return;
     if (activeSingles.get(index) === jobId) return;
     activeSingles.set(index, jobId);
     const btn = document.querySelector('button[data-i="' + index + '"]');
@@ -167,9 +205,10 @@
     let missingChecks = 0;
     try {
       for (;;) {
-        if (activeSingles.get(index) !== jobId) return;
+        if (epoch !== documentEpoch || activeSingles.get(index) !== jobId) return;
         try {
           const r = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+          if (epoch !== documentEpoch || activeSingles.get(index) !== jobId) return;
           if (!r.ok) {
             if (r.status === 404 && ++missingChecks < 4) {
               await sleep(1000);
@@ -186,9 +225,10 @@
 
           missingChecks = 0;
           const data = await r.json();
+          if (epoch !== documentEpoch || activeSingles.get(index) !== jobId) return;
           if (data.state === 'complete') {
             if (data.ready && data.ready[0]) {
-              if (await installSingleAudio(index, jobId, data.ready[0])) return;
+              if (await installSingleAudio(index, jobId, data.ready[0], epoch)) return;
             } else if (data.failed && data.failed[0]) {
               if (out) out.innerHTML = '<p style="color:#b00">Falhou: ' + esc(data.failed[0].error || 'erro desconhecido') + '</p>';
               setSingleJob(index, null);
@@ -204,6 +244,7 @@
             out.innerHTML = '<p>Gerando no servidor… Pode atualizar/fechar a página.</p>';
           }
         } catch (_) {
+          if (epoch !== documentEpoch || activeSingles.get(index) !== jobId) return;
           if (out) out.innerHTML = navigator.onLine
             ? '<p>Sem conseguir consultar a geração — tentando novamente…</p>'
             : '<p>Sem internet. A geração continua no servidor.</p>';
@@ -217,14 +258,19 @@
     }
   }
 
-  async function ensureSingleStarted(index, jobId, track) {
+  async function ensureSingleStarted(index, jobId, track, epoch = documentEpoch) {
     for (;;) {
+      if (epoch !== documentEpoch) return false;
       try {
         const r = await fetch('/api/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ jobId, tracks: [track], voice: VOICE, docname: DOCNAME }),
         });
+        if (epoch !== documentEpoch) {
+          if (r.ok || r.status === 409) terminateJob(jobId);
+          return false;
+        }
         if (r.ok || r.status === 409) return true;
         const err = await r.json().catch(() => ({}));
         setSingleJob(index, null);
@@ -232,6 +278,7 @@
         if (out) out.innerHTML = '<p style="color:#b00">Falhou ao iniciar: ' + esc(err.error || ('HTTP ' + r.status)) + '</p>';
         return false;
       } catch (_) {
+        if (epoch !== documentEpoch) return false;
         const out = document.querySelector('#card' + index + ' .out');
         if (out) out.innerHTML = navigator.onLine
           ? '<p>Sem conseguir confirmar o início — tentando novamente…</p>'
@@ -244,6 +291,7 @@
   // Override the old page-bound /api/speak request. A one-track Workflow uses
   // the same synthesis code but survives navigation/reload and stores audio in R2.
   generateOne = async function(index) {
+    const epoch = documentEpoch;
     const t = TRACKS[index];
     if (!t) return false;
 
@@ -251,7 +299,7 @@
     if (active) {
       activeSingles.delete(index);
       setSingleJob(index, null);
-      try { await fetch('/api/jobs/' + encodeURIComponent(active), { method: 'DELETE' }); } catch (_) {}
+      terminateJob(active);
       const out = document.querySelector('#card' + index + ' .out');
       if (out) out.innerHTML = '<p>Cancelado.</p>';
       return false;
@@ -259,8 +307,8 @@
 
     const remembered = loadSingleJobs()[index];
     if (remembered && !t._buf) {
-      await monitorSingle(index, remembered);
-      return !!TRACKS[index]?._buf;
+      await monitorSingle(index, remembered, epoch);
+      return epoch === documentEpoch && !!TRACKS[index]?._buf;
     }
     if (remembered && t._buf) setSingleJob(index, null); // explicit click = regenerate
 
@@ -269,23 +317,31 @@
     const out = document.querySelector('#card' + index + ' .out');
     if (out) out.innerHTML = '<p>Iniciando geração no servidor…</p>';
 
-    if (!(await ensureSingleStarted(index, jobId, t))) return false;
-    await monitorSingle(index, jobId);
-    return !!TRACKS[index]?._buf;
+    if (!(await ensureSingleStarted(index, jobId, t, epoch))) return false;
+    if (epoch !== documentEpoch) {
+      terminateJob(jobId);
+      return false;
+    }
+    await monitorSingle(index, jobId, epoch);
+    return epoch === documentEpoch && !!TRACKS[index]?._buf;
   };
 
   // Save the parsed document after the existing DOCX/PDF parser succeeds.
+  // Starting a new document also invalidates and terminates every job from the
+  // previous document so late responses can never populate the new track list.
   const parseBtn = document.getElementById('parse');
   if (parseBtn && typeof parseBtn.onclick === 'function') {
     const originalParse = parseBtn.onclick;
     parseBtn.onclick = async () => {
-      if (activeSingles.size) {
-        status.textContent = 'Cancele a geração individual em andamento antes de carregar outro documento.';
+      const file = document.getElementById('file')?.files?.[0] || null;
+      if (!file) {
+        await originalParse();
         return;
       }
-      const file = document.getElementById('file')?.files?.[0] || null;
+
+      cancelPreviousSession();
       await originalParse();
-      if (TRACKS.length && file) {
+      if (TRACKS.length) {
         try {
           localStorage.removeItem(SINGLE_KEY);
           await saveDocument(file.name);
